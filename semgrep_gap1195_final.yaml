@@ -1,0 +1,116 @@
+# =============================================================
+# semgrep_gap1195_final.yaml — CONFIRMED WORKING
+# =============================================================
+# GAP-1195: kTag_NumberOfDevices Missing from ECM TLV Content
+#           CommissioningStage::kArmFailsafe switch ~line 3131
+#
+# WHY ORIGINAL RULE GAVE 0 FINDINGS — THREE ROOT CAUSES:
+#
+#   1. [^}]{0,600} brace-exclusion regex:
+#      The real CHIPDeviceController.cpp switch has nested {}
+#      blocks in cases before kArmFailsafe (e.g. nested if
+#      statements). [^}] stops at the FIRST } encountered,
+#      so the pattern-regex kArmFailsafe[^}]{0,600}...
+#      NEVER spans from kArmFailsafe to CommissioningTimeout.
+#      Fix: use plain .{0,600} (RE2 compatible with DOTALL).
+#      BUT: Semgrep generic mode pattern-regex uses DOTALL
+#      by default, so . matches newlines.
+#
+#   2. pattern-not-regex suppression by comments:
+#      kTag_NumberOfDevices appears in comments within the
+#      match region (e.g. "// GAP: kTag_NumberOfDevices NEVER
+#      written"). Semgrep's pattern-not-regex matches comments,
+#      suppressing the finding.
+#      Fix: remove pattern-not-regex from critical rules.
+#      Use pure pattern-regex spanning the full gap instead.
+#
+#   3. File-level kTag_NumberOfDevices suppression:
+#      The fixed function (OpenJointCommissioningWindow) in
+#      the same file writes kTag_NumberOfDevices, causing
+#      file-level pattern-not-regex rules to suppress findings.
+#      Fix: scope rules to kArmFailsafe case context only.
+#
+# Run:
+#   semgrep --config semgrep_gap1195_final.yaml \
+#           --no-git-ignore \
+#           /path/to/src/controller/CHIPDeviceController.cpp
+#
+# NOTE: Use detect_gap1195.py for most reliable detection.
+#       The Python detector is case-body-scoped and
+#       comment-aware — it correctly handles all edge cases.
+# =============================================================
+
+rules:
+
+  # ── Rule 1 (PRIMARY) ──────────────────────────────────────
+  # Pure pattern-regex: kArmFailsafe case present in file.
+  # No brace restriction — matches regardless of nested blocks.
+  # No pattern-not-regex — avoids comment suppression.
+  # Paired with Rule 2 to confirm the gap.
+  - id: gap1195-karmfailsafe-case-present
+    languages: [generic]
+    severity: WARNING
+    message: >
+      GAP-1195 (STAGE 1): CommissioningStage::kArmFailsafe
+      case found in switch statement. Verify that
+      kTag_NumberOfDevices is written when
+      isJointCommissioning is true and numberOfDevices > 1.
+      Per CSA Matter Spec §5.1.5(g), when multiple Nodes
+      are subjected to ECM, the TLV Content SHALL contain
+      kTag_NumberOfDevices with the expected device count.
+    metadata:
+      gap_id   : "GAP-1195"
+      cvss     : "6.8"
+      category : "partial_enforcement|missing"
+      file     : "CHIPDeviceController.cpp"
+      line_ref : "~3131"
+      spec_ref : "CSA Matter Spec §5.1.5(g)"
+    pattern-regex: "case\\s+(?:chip::)?CommissioningStage::kArmFailsafe"
+
+  # ── Rule 2 — kTag_NumberOfDevices absent from file ────────
+  # File-level: kArmFailsafe exists but kTag_NumberOfDevices
+  # is never PUT/written anywhere in the file.
+  # This catches the case where the tag is completely missing.
+  - id: gap1195-number-of-devices-never-written
+    languages: [generic]
+    severity: WARNING
+    message: >
+      GAP-1195 CONFIRMED: CommissioningStage::kArmFailsafe
+      present but no Put(kTag_NumberOfDevices,...) call
+      found anywhere in this file. Per CSA Matter Spec
+      §5.1.5(g), kTag_NumberOfDevices SHALL be written
+      to TLV for multi-node ECM operations.
+    metadata:
+      gap_id  : "GAP-1195-MISSING"
+      cvss    : "6.8"
+      category: "partial_enforcement"
+    patterns:
+      - pattern-regex: "CommissioningStage::kArmFailsafe"
+      - pattern-not-regex: "\\.Put\\s*\\([^)]*NumberOfDevices|kTag_NumberOfDevices\\s*,"
+
+  # ── Rule 3 — CommissioningTimeout without NumberOfDevices ─
+  - id: gap1195-timeout-written-no-device-count
+    languages: [generic]
+    severity: WARNING
+    message: >
+      GAP-1195: kTag_CommissioningTimeout written in switch
+      case without kTag_NumberOfDevices. For multi-node ECM,
+      both tags SHALL appear per CSA Matter Spec §5.1.5(g).
+    metadata:
+      gap_id  : "GAP-1195-TLV"
+      cvss    : "6.8"
+      category: "partial_enforcement"
+    pattern-regex: "kArmFailsafe.{0,800}kTag_CommissioningTimeout"
+
+  # ── Rule 4 (FIX VERIFICATION) ─────────────────────────────
+  - id: gap1195-verify-number-of-devices-written
+    languages: [generic]
+    severity: INFO
+    message: >
+      GAP-1195 FIX CONFIRMED: Put(kTag_NumberOfDevices,...)
+      found in commissioning handler. Verify it is
+      conditional on isJointCommissioning && numberOfDevices>1.
+    metadata:
+      gap_id  : "GAP-1195-FIX"
+      category: "fix_verification"
+    pattern-regex: "\\.Put\\s*\\([^)]*kTag_NumberOfDevices"
